@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/cinemeta search movie|series QUERY
+  scripts/cinemeta meta movie|series ID
+  scripts/cinemeta seasons SERIES_ID
+  scripts/cinemeta episodes SERIES_ID
+  scripts/cinemeta episodes SERIES_ID SEASON
+
+Convenience helpers for Cinemeta lookup. These commands do not choose what to
+play and do not touch the TV.
+
+Output is tab-separated and intended for agent inspection.
+
+Examples:
+  scripts/cinemeta search movie 'the matrix'
+  scripts/cinemeta search series 'walking dead'
+  scripts/cinemeta seasons tt1520211
+  scripts/cinemeta episodes tt1520211 11
+USAGE
+}
+
+require_tools() {
+  for required in curl jq; do
+    if ! command -v "$required" >/dev/null 2>&1; then
+      echo "error: $required is not installed or is not on PATH" >&2
+      exit 69
+    fi
+  done
+}
+
+require_type() {
+  case "${1:-}" in
+    movie|series)
+      ;;
+    *)
+      echo "error: type must be movie or series" >&2
+      exit 64
+      ;;
+  esac
+}
+
+urlencode() {
+  jq -nr --arg value "$1" '$value | @uri'
+}
+
+search() {
+  local type="$1"
+  shift
+  require_type "$type"
+  if (($# == 0)); then
+    echo "error: missing search query" >&2
+    exit 64
+  fi
+
+  local query encoded
+  query="$*"
+  encoded="$(urlencode "$query")"
+
+  curl -fsS "https://v3-cinemeta.strem.io/catalog/$type/top/search=$encoded.json" |
+    jq -r --arg type "$type" '
+      ["result", "type", "name", "release_info", "id", "imdb_id", "score"],
+      ((.metas // [])
+        | to_entries[]
+        | select(.value.type == $type)
+        | [
+          ((.key + 1) | tostring),
+          .value.type,
+          .value.name,
+          (.value.releaseInfo // .value.year // ""),
+          (.value.id // .value.imdb_id // ""),
+          (.value.imdb_id // .value.id // ""),
+          ((.value.score // .value.popularity // "") | tostring)
+        ])
+      | @tsv
+    '
+}
+
+meta() {
+  local type="$1"
+  local id="$2"
+  require_type "$type"
+  if [[ -z "$id" ]]; then
+    echo "error: missing id" >&2
+    exit 64
+  fi
+
+  curl -fsS "https://v3-cinemeta.strem.io/meta/$type/$id.json"
+}
+
+seasons() {
+  local id="$1"
+  if [[ -z "$id" ]]; then
+    echo "error: missing series id" >&2
+    exit 64
+  fi
+
+  curl -fsS "https://v3-cinemeta.strem.io/meta/series/$id.json" |
+    jq -r '
+      ["season", "episodes", "first_released", "last_released"],
+      ([.meta.videos[]? | select(.season != null and .episode != null and (.id // "") != "")]
+        | sort_by(.season, .episode)
+        | group_by(.season)
+        | .[]
+        | [
+            (.[0].season | tostring),
+            (length | tostring),
+            (.[0].released // ""),
+            (.[-1].released // "")
+          ])
+      | @tsv
+    '
+}
+
+episodes() {
+  local id="$1"
+  local season="${2:-}"
+  if [[ -z "$id" ]]; then
+    echo "error: missing series id" >&2
+    exit 64
+  fi
+
+  curl -fsS "https://v3-cinemeta.strem.io/meta/series/$id.json" |
+    jq -r --arg season "$season" '
+      ["season", "episode", "released", "id", "title"],
+      ([.meta.videos[]? | select(.season != null and .episode != null and (.id // "") != "")]
+        | sort_by(.season, .episode)
+        | .[]
+        | select($season == "" or (.season | tostring) == $season)
+        | [
+            (.season | tostring),
+            (.episode | tostring),
+            (.released // ""),
+            .id,
+            (.title // "")
+          ])
+      | @tsv
+    '
+}
+
+if (($# == 0)); then
+  usage >&2
+  exit 64
+fi
+
+case "$1" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+require_tools
+
+command="$1"
+shift
+
+case "$command" in
+  search)
+    if (($# < 2)); then
+      echo "error: usage: scripts/cinemeta search movie|series QUERY" >&2
+      exit 64
+    fi
+    type="$1"
+    shift
+    search "$type" "$@"
+    ;;
+  meta)
+    if (($# != 2)); then
+      echo "error: usage: scripts/cinemeta meta movie|series ID" >&2
+      exit 64
+    fi
+    meta "$1" "$2"
+    ;;
+  episodes)
+    if (($# < 1 || $# > 2)); then
+      echo "error: usage: scripts/cinemeta episodes SERIES_ID [SEASON]" >&2
+      exit 64
+    fi
+    episodes "$@"
+    ;;
+  seasons)
+    if (($# != 1)); then
+      echo "error: usage: scripts/cinemeta seasons SERIES_ID" >&2
+      exit 64
+    fi
+    seasons "$1"
+    ;;
+  *)
+    echo "error: unknown command: $command" >&2
+    usage >&2
+    exit 64
+    ;;
+esac

@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/local-env.sh
+source "$script_dir/lib/local-env.sh"
+load_local_env
+
+host="${SONOS_HOST:-}"
+port="${SONOS_PORT:-1400}"
+step="${SONOS_VOLUME_STEP:-10}"
+dry_run=0
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/sonos [--host HOST] [--port PORT] [--dry-run] COMMAND [VALUE]
+
+Control a Sonos speaker directly over local UPnP.
+
+Set the host with --host HOST or SONOS_HOST.
+
+Commands:
+  status              Print current volume and mute state.
+  volume              Print current volume.
+  volume 25           Set volume to 25%.
+  set-volume 25       Set volume to 25%.
+  up [STEP]           Raise volume by STEP percentage points. Default: 10.
+  down [STEP]         Lower volume by STEP percentage points. Default: 10.
+  mute                Mute.
+  unmute              Unmute.
+  toggle-mute         Toggle mute.
+  help                Show this help.
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+need_host() {
+  [[ -n "$host" ]] && return 0
+
+  cat >&2 <<'EOF'
+error: Sonos host is not configured
+
+Run:
+  scripts/connect-sonos
+
+That discovers the Sonos speaker and writes ignored local config to .env.
+EOF
+  exit 69
+}
+
+need_curl() {
+  command -v curl >/dev/null 2>&1 || die "curl is not installed or is not on PATH"
+}
+
+soap_url() {
+  need_host
+  printf 'http://%s:%s/MediaRenderer/RenderingControl/Control' "$host" "$port"
+}
+
+soap() {
+  local action="$1"
+  local body="$2"
+
+  need_curl
+  need_host
+  curl -sS \
+    -H 'Content-Type: text/xml; charset="utf-8"' \
+    -H "SOAPACTION: \"urn:schemas-upnp-org:service:RenderingControl:1#$action\"" \
+    --data "$body" \
+    "$(soap_url)"
+}
+
+envelope() {
+  local inner="$1"
+  printf '%s%s%s' \
+    '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>' \
+    "$inner" \
+    '</s:Body></s:Envelope>'
+}
+
+validate_percent() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "volume must be an integer from 0 to 100"
+  ((value >= 0 && value <= 100)) || die "volume must be an integer from 0 to 100"
+}
+
+validate_step() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "step must be a non-negative integer"
+}
+
+get_volume() {
+  local response
+  response="$(soap GetVolume "$(envelope '<u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><InstanceID>0</InstanceID><Channel>Master</Channel></u:GetVolume>')")"
+  sed -n 's/.*<CurrentVolume>\([0-9][0-9]*\)<\/CurrentVolume>.*/\1/p' <<<"$response"
+}
+
+set_volume() {
+  local value="$1"
+  validate_percent "$value"
+
+  local request
+  request="$(envelope "<u:SetVolume xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>$value</DesiredVolume></u:SetVolume>")"
+
+  if ((dry_run)); then
+    need_host
+    printf 'curl %s SetVolume %s\n' "$(soap_url)" "$value"
+    return
+  fi
+
+  soap SetVolume "$request" >/dev/null
+  printf 'volume=%s\n' "$(get_volume)"
+}
+
+get_mute() {
+  local response
+  response="$(soap GetMute "$(envelope '<u:GetMute xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1"><InstanceID>0</InstanceID><Channel>Master</Channel></u:GetMute>')")"
+  sed -n 's/.*<CurrentMute>\([01]\)<\/CurrentMute>.*/\1/p' <<<"$response"
+}
+
+set_mute() {
+  local value="$1"
+  [[ "$value" == 0 || "$value" == 1 ]] || die "mute value must be 0 or 1"
+
+  local request
+  request="$(envelope "<u:SetMute xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\"><InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>$value</DesiredMute></u:SetMute>")"
+
+  if ((dry_run)); then
+    need_host
+    printf 'curl %s SetMute %s\n' "$(soap_url)" "$value"
+    return
+  fi
+
+  soap SetMute "$request" >/dev/null
+  printf 'mute=%s\n' "$(get_mute)"
+}
+
+adjust_volume() {
+  local direction="$1"
+  local amount="${2:-$step}"
+  validate_step "$amount"
+
+  local current next
+  current="$(get_volume)"
+  [[ -n "$current" ]] || die "could not read current Sonos volume"
+
+  if [[ "$direction" == up ]]; then
+    next=$((current + amount))
+  else
+    next=$((current - amount))
+  fi
+
+  ((next < 0)) && next=0
+  ((next > 100)) && next=100
+  set_volume "$next"
+}
+
+if (($# == 0)); then
+  usage >&2
+  exit 64
+fi
+
+while (($#)); do
+  case "$1" in
+    --host)
+      (($# >= 2)) || die "$1 requires a value"
+      host="$2"
+      shift 2
+      ;;
+    --port)
+      (($# >= 2)) || die "$1 requires a value"
+      port="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      command="$1"
+      shift
+      break
+      ;;
+  esac
+done
+
+case "${command:-}" in
+  status)
+    printf 'host=%s:%s\n' "$host" "$port"
+    printf 'volume=%s\n' "$(get_volume)"
+    printf 'mute=%s\n' "$(get_mute)"
+    ;;
+  volume)
+    if (($# == 0)); then
+      printf 'volume=%s\n' "$(get_volume)"
+    elif (($# == 1)); then
+      set_volume "$1"
+    else
+      die "volume accepts at most one value"
+    fi
+    ;;
+  set-volume)
+    (($# == 1)) || die "set-volume requires exactly one value"
+    set_volume "$1"
+    ;;
+  up|down)
+    (($# <= 1)) || die "$command accepts at most one step value"
+    adjust_volume "$command" "${1:-$step}"
+    ;;
+  mute)
+    (($# == 0)) || die "mute accepts no arguments"
+    set_mute 1
+    ;;
+  unmute)
+    (($# == 0)) || die "unmute accepts no arguments"
+    set_mute 0
+    ;;
+  toggle-mute)
+    (($# == 0)) || die "toggle-mute accepts no arguments"
+    current="$(get_mute)"
+    [[ -n "$current" ]] || die "could not read current Sonos mute state"
+    if [[ "$current" == 1 ]]; then
+      set_mute 0
+    else
+      set_mute 1
+    fi
+    ;;
+  *)
+    echo "error: unknown command: ${command:-}" >&2
+    usage >&2
+    exit 64
+    ;;
+esac

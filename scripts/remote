@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+serial="$(tv_serial)"
+json=0
+dry_run=0
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+emit_remote_status_json() {
+  local sonos_output="$1"
+  local adb_available="$2"
+  local adb_error="$3"
+  local stream_music_output="$4"
+  local media_output="$5"
+
+  local has_media_session=false
+  if printf '%s\n' "$media_output" | grep -q 'package='; then
+    has_media_session=true
+  fi
+
+  printf '{'
+  printf '"result":"ok",'
+  printf '"sonos_output":"%s",' "$(json_escape "$sonos_output")"
+  printf '"adb_available":%s,' "$adb_available"
+  printf '"adb_error":"%s",' "$(json_escape "$adb_error")"
+  printf '"has_media_session":%s,' "$has_media_session"
+  printf '"stream_music":"%s",' "$(json_escape "$stream_music_output")"
+  printf '"media_sessions":"%s"' "$(json_escape "$media_output")"
+  printf '}'
+  printf '\n'
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/remote [--serial SERIAL] [--dry-run] [--json] COMMAND
+
+General Shield remote controls.
+
+Commands:
+  vol-up          Raise Sonos soundbar volume.
+  vol-down        Lower Sonos soundbar volume.
+  mute            Toggle Sonos soundbar mute.
+  play-pause      Toggle media play/pause.
+  pause           Press media pause.
+  play            Press media play.
+  stop            Press media stop.
+  power-on        Turn on / wake the Shield and TV.
+  power-off       Turn off the Shield and TV.
+  power           Toggle Shield and TV power.
+  wallpaper-on    Stop media and start Aerial Views.
+  wallpaper-off   Stop Aerial Views.
+  back            Press back.
+  home            Press home.
+  up              Press D-pad up.
+  down            Press D-pad down.
+  left            Press D-pad left.
+  right           Press D-pad right.
+  ok              Press OK / select.
+  status          Print Sonos volume, active media session, and STREAM_MUSIC volume.
+  help            Show this help.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+  --dry-run              Print the delegated command without changing the TV.
+  --json                 Emit machine-readable status/result output where supported.
+USAGE
+}
+
+if (($# == 0)); then
+  usage >&2
+  exit 64
+fi
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -n "${command:-}" ]]; then
+        echo "error: unexpected extra arguments: $*" >&2
+        exit 64
+      fi
+      command="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+keyevent() {
+  local adb_args=()
+  if [[ -n "$serial" ]]; then
+    adb_args=(-s "$serial")
+  fi
+
+  if ((dry_run)); then
+    printf 'DRY RUN: '
+    printf '%q ' adb "${adb_args[@]}" shell input keyevent "$1"
+    printf '\n'
+    printf 'result=dry_run\n'
+    return
+  fi
+
+  if ! command -v adb >/dev/null 2>&1; then
+    echo "error: adb is not installed or is not on PATH" >&2
+    exit 69
+  fi
+  "$script_dir/wallpaper" "${adb_args[@]}" off-if-active >/dev/null
+  adb "${adb_args[@]}" shell input keyevent "$1"
+}
+
+status() {
+  local adb_args=()
+  if [[ -n "$serial" ]]; then
+    adb_args=(-s "$serial")
+  fi
+
+  local sonos_output
+  local stream_music_output
+  local media_output
+  local adb_available=0
+  local adb_error=""
+
+  if [[ -n "${SONOS_HOST:-}" ]]; then
+    if sonos_output="$($script_dir/sonos status 2>&1)"; then
+      :
+    else
+      sonos_output="not available: $sonos_output"
+    fi
+  else
+    sonos_output="not configured; set SONOS_HOST or pass --host to scripts/sonos"
+  fi
+
+  if command -v adb >/dev/null 2>&1; then
+    adb_available=1
+    stream_music_output="$(adb "${adb_args[@]}" shell dumpsys audio | sed -n '/^- STREAM_MUSIC:/,/^- STREAM_ALARM:/p' | sed '$d' 2>/dev/null || true)"
+    media_output="$(adb "${adb_args[@]}" shell dumpsys media_session | grep -En "Media button session|package=|state=|metadata" 2>/dev/null || true)"
+  else
+    adb_error="unavailable"
+    stream_music_output=""
+    media_output=""
+  fi
+
+  if ((json)); then
+    emit_remote_status_json "$sonos_output" "$adb_available" "$adb_error" "$stream_music_output" "$media_output"
+    return
+  fi
+
+  echo "Sonos:"
+  echo "$sonos_output"
+  echo
+
+  if ((adb_available == 0)); then
+    echo "ADB: unavailable"
+    return
+  fi
+
+  echo "STREAM_MUSIC:"
+  echo "$stream_music_output"
+  echo
+  echo "Active media sessions:"
+  echo "$media_output"
+}
+
+power() {
+  local action="$1"
+  local args=(--serial "$serial")
+  if ((dry_run)); then
+    args+=(--dry-run)
+  fi
+  if ((json)); then
+    args+=(--json)
+  fi
+  "$script_dir/power" "${args[@]}" "$action"
+}
+
+case "${command:-}" in
+  vol-up)
+    sonos_args=()
+    if ((dry_run)); then
+      sonos_args+=(--dry-run)
+    fi
+    "$script_dir/sonos" "${sonos_args[@]}" up
+    ;;
+  vol-down)
+    sonos_args=()
+    if ((dry_run)); then
+      sonos_args+=(--dry-run)
+    fi
+    "$script_dir/sonos" "${sonos_args[@]}" down
+    ;;
+  mute)
+    sonos_args=()
+    if ((dry_run)); then
+      sonos_args+=(--dry-run)
+    fi
+    "$script_dir/sonos" "${sonos_args[@]}" toggle-mute
+    ;;
+  play-pause)
+    keyevent KEYCODE_MEDIA_PLAY_PAUSE
+    ;;
+  pause)
+    keyevent KEYCODE_MEDIA_PAUSE
+    ;;
+  play)
+    keyevent KEYCODE_MEDIA_PLAY
+    ;;
+  stop)
+    keyevent KEYCODE_MEDIA_STOP
+    ;;
+  power-on|wake)
+    power on
+    ;;
+  power-off|sleep)
+    power off
+    ;;
+  power|power-toggle)
+    power toggle
+    ;;
+  wallpaper-on)
+    wallpaper_args=()
+    if [[ -n "$serial" ]]; then
+      wallpaper_args+=(--serial "$serial")
+    fi
+    if ((dry_run)); then
+      wallpaper_args+=(--dry-run)
+    fi
+    "$script_dir/wallpaper" "${wallpaper_args[@]}" on
+    ;;
+  wallpaper-off)
+    wallpaper_args=()
+    if [[ -n "$serial" ]]; then
+      wallpaper_args+=(--serial "$serial")
+    fi
+    if ((dry_run)); then
+      wallpaper_args+=(--dry-run)
+    fi
+    "$script_dir/wallpaper" "${wallpaper_args[@]}" off
+    ;;
+  back)
+    keyevent KEYCODE_BACK
+    ;;
+  home)
+    keyevent KEYCODE_HOME
+    ;;
+  up)
+    keyevent KEYCODE_DPAD_UP
+    ;;
+  down)
+    keyevent KEYCODE_DPAD_DOWN
+    ;;
+  left)
+    keyevent KEYCODE_DPAD_LEFT
+    ;;
+  right)
+    keyevent KEYCODE_DPAD_RIGHT
+    ;;
+  ok|select|enter)
+    keyevent KEYCODE_DPAD_CENTER
+    ;;
+  status)
+    status
+    ;;
+  *)
+    echo "error: unknown command: ${command:-}" >&2
+    usage >&2
+    exit 64
+    ;;
+esac

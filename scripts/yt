@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/yt [--serial SERIAL] [--package PACKAGE] [--dry-run] SLUG
+  scripts/yt --list
+
+Launch a saved YouTube preset on the TV.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+                         Defaults to TV_ADB_SERIAL, then .tv-serial, then ADB's selected device.
+  -p, --package PACKAGE  Android package to receive the intent.
+  --dry-run              Print the adb command without invoking adb.
+  --list                 List saved presets.
+  -h, --help             Show this help.
+
+Examples:
+  scripts/yt --list
+  scripts/yt PRESET_SLUG
+  scripts/yt --dry-run PRESET_SLUG
+USAGE
+}
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+presets_file="$repo_root/data/youtube-presets.tsv"
+
+serial=""
+package=""
+dry_run=0
+list=0
+slug=""
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    -p|--package)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      package="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --list)
+      list=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+    *)
+      if [[ -n "$slug" ]]; then
+        echo "error: expected one preset slug, got extra argument: $1" >&2
+        exit 64
+      fi
+      slug="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ ! -f "$presets_file" ]]; then
+  echo "error: missing presets file: $presets_file" >&2
+  exit 66
+fi
+
+print_presets() {
+  awk -F '\t' '
+    NR > 1 {
+      found = 1
+      printf "%-18s %s (%s)\n", $1, $2, $3
+    }
+    END {
+      if (!found) {
+        print "No saved presets."
+      }
+    }
+  ' "$presets_file"
+}
+
+if ((list)); then
+  if [[ -n "$slug" ]]; then
+    echo "error: --list does not accept a slug" >&2
+    exit 64
+  fi
+  print_presets
+  exit 0
+fi
+
+if [[ -z "$slug" ]]; then
+  echo "error: missing preset slug" >&2
+  usage >&2
+  echo >&2
+  echo "Saved presets:" >&2
+  print_presets >&2
+  exit 64
+fi
+
+found=0
+title=""
+channel=""
+url=""
+
+while IFS=$'\t' read -r preset_slug preset_title preset_channel _preset_video_id preset_url; do
+  if [[ "$preset_slug" == "slug" ]]; then
+    continue
+  fi
+
+  if [[ "$preset_slug" == "$slug" ]]; then
+    found=1
+    title="$preset_title"
+    channel="$preset_channel"
+    url="$preset_url"
+    break
+  fi
+done < "$presets_file"
+
+if (( ! found )); then
+  echo "error: unknown preset: $slug" >&2
+  echo >&2
+  echo "Saved presets:" >&2
+  print_presets >&2
+  exit 65
+fi
+
+args=()
+if [[ -n "$serial" ]]; then
+  args+=(--serial "$serial")
+fi
+if [[ -n "$package" ]]; then
+  args+=(--package "$package")
+fi
+if ((dry_run)); then
+  args+=(--dry-run)
+fi
+
+echo "Playing: $title ($channel)"
+"$script_dir/play-youtube" "${args[@]}" "$url"

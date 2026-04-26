@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+serial="$(tv_serial)"
+json=0
+
+json_escape() {
+  local value="$1"
+  value="${value//\\//\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    -h|--help|help)
+      cat <<'USAGE'
+Usage:
+  scripts/stremio-status [--serial SERIAL] [--json]
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      echo "usage: scripts/stremio-status [--serial SERIAL]" >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+status_output="$(adb "${adb_args[@]}" shell dumpsys media_session | awk '/Media button session|package=com.stremio.one|state=PlaybackState|metadata/ { print }' || true)"
+
+if ((json)); then
+  has_stremio_session=false
+  has_playing_state=false
+  if printf '%s\n' "$status_output" | grep -q 'package=com.stremio.one'; then
+    has_stremio_session=true
+  fi
+  if printf '%s\n' "$status_output" | grep -q 'state=PlaybackState {state=3'; then
+    has_playing_state=true
+  fi
+
+  printf '{'
+  printf '"result":"ok",'
+  printf '"has_stremio_session":%s,' "$has_stremio_session"
+  printf '"has_playing_state":%s,' "$has_playing_state"
+  printf '"line_count":%s,' "$(awk 'END {print NR}' <<<"$status_output")"
+  printf '"snippet":"%s"' "$(json_escape "$(printf '%s\n' "$status_output" | sed -n '1,16p')")"
+  printf '}\n'
+  exit 0
+fi
+
+printf '%s\n' "$status_output"

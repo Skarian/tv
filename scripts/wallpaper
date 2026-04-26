@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/wallpaper [--serial SERIAL] [--dry-run] COMMAND
+
+Control the Aerial Views Android TV wallpaper/screensaver.
+
+Commands:
+  status       Print whether Aerial Views appears to be active.
+  on           Stop known media apps, then start Aerial Views.
+  off          Stop Aerial Views.
+  off-if-active
+               Stop Aerial Views only if it appears to be active.
+  help         Show this help.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+                         Defaults to TV_ADB_SERIAL, then .tv-serial, then ADB's selected device.
+  --dry-run              Print commands without invoking adb.
+USAGE
+}
+
+serial="$(tv_serial)"
+dry_run=0
+command=""
+package="com.neilturner.aerialviews"
+component="com.neilturner.aerialviews/com.neilturner.aerialviews.ui.screensaver.DreamActivity"
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -n "$command" ]]; then
+        echo "error: unexpected extra arguments: $*" >&2
+        exit 64
+      fi
+      command="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$command" ]]; then
+  usage >&2
+  exit 64
+fi
+
+case "$command" in
+  status|on|off|off-if-active)
+    ;;
+  *)
+    echo "error: unknown command: $command" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+need_adb() {
+  if ! command -v adb >/dev/null 2>&1; then
+    echo "error: adb is not installed or is not on PATH" >&2
+    exit 69
+  fi
+}
+
+active_window_text() {
+  adb "${adb_args[@]}" shell dumpsys window 2>/dev/null |
+    sed -n '/mCurrentFocus/p;/mFocusedApp/p'
+}
+
+dream_text() {
+  adb "${adb_args[@]}" shell dumpsys dreams 2>/dev/null || true
+}
+
+active_window_match() {
+  {
+    active_window_text
+    dream_text
+  } | sed -n "/$package/p" | sed -n '1p'
+}
+
+is_active() {
+  [[ -n "$(active_window_match)" ]]
+}
+
+print_status() {
+  local window match active=0
+  need_adb
+  window="$(
+    active_window_text
+    dream_text
+  )"
+  match="$(printf '%s\n' "$window" | sed -n "/$package/p" | sed -n '1p')"
+  if [[ -n "$match" ]]; then
+    active=1
+  fi
+  printf 'active=%s\n' "$active"
+  printf 'package=%s\n' "$package"
+  printf 'component=%s\n' "$component"
+  if [[ -n "$window" ]]; then
+    printf '%s\n' "$window"
+  fi
+}
+
+start_wallpaper() {
+  if ((dry_run)); then
+    "$script_dir/stop-media" "${adb_args[@]}" --dry-run
+    printf 'DRY RUN: '
+    printf '%q ' adb "${adb_args[@]}" shell service call dreams 1
+    printf '\n'
+    printf 'result=dry_run\n'
+    return
+  fi
+
+  need_adb
+  "$script_dir/stop-media" "${adb_args[@]}"
+  adb "${adb_args[@]}" shell service call dreams 1 >/dev/null
+  printf 'result=success\n'
+}
+
+stop_wallpaper() {
+  local only_if_active="${1:-0}"
+
+  if ((dry_run)); then
+    if ((only_if_active)); then
+      printf 'DRY RUN: if active, '
+    else
+      printf 'DRY RUN: '
+    fi
+    printf '%q ' adb "${adb_args[@]}" shell service call dreams 2
+    printf '\n'
+    printf 'DRY RUN: '
+    printf '%q ' adb "${adb_args[@]}" shell am force-stop "$package"
+    printf '\n'
+    printf 'result=dry_run\n'
+    return
+  fi
+
+  need_adb
+  if ((only_if_active)) && ! is_active; then
+    printf 'result=not_active\n'
+    return
+  fi
+
+  adb "${adb_args[@]}" shell service call dreams 2 >/dev/null 2>&1 || true
+  adb "${adb_args[@]}" shell am force-stop "$package" >/dev/null 2>&1 || true
+  printf 'result=success\n'
+}
+
+case "$command" in
+  status)
+    if ((dry_run)); then
+      printf 'DRY RUN: '
+      printf '%q ' adb "${adb_args[@]}" shell dumpsys dreams
+      printf '\n'
+      printf 'DRY RUN: '
+      printf '%q ' adb "${adb_args[@]}" shell dumpsys window
+      printf '\n'
+      printf 'result=dry_run\n'
+    else
+      print_status
+    fi
+    ;;
+  on)
+    start_wallpaper
+    ;;
+  off)
+    stop_wallpaper 0
+    ;;
+  off-if-active)
+    stop_wallpaper 1
+    ;;
+esac

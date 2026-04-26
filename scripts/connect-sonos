@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/local-env.sh
+source "$script_dir/lib/local-env.sh"
+load_local_env
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/connect-sonos [HOST]
+
+Discover and save a local Sonos speaker host for volume control. If HOST is
+omitted, try SONOS_HOST first, then scan TV_SCAN_PREFIX.1-254 on port 1400.
+
+Environment:
+  SONOS_HOST     Existing Sonos host to verify.
+  SONOS_PORT     Sonos UPnP port. Defaults to 1400.
+  TV_SCAN_PREFIX IPv4 /24 prefix to scan. Defaults to 192.168.1.
+USAGE
+}
+
+if (($# > 1)); then
+  usage >&2
+  exit 64
+fi
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  -*)
+    echo "error: unknown option: $1" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "error: curl is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+if ! command -v nc >/dev/null 2>&1; then
+  echo "error: nc is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+sonos_port="${SONOS_PORT:-1400}"
+
+port_open() {
+  local ip="$1"
+
+  if nc -z -w 1 "$ip" "$sonos_port" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if nc -G 1 -z "$ip" "$sonos_port" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+xml_text() {
+  local host="$1"
+  curl -fsS --max-time 2 "http://$host:$sonos_port/xml/device_description.xml" 2>/dev/null || true
+}
+
+xml_value() {
+  local tag="$1"
+  sed -n "s/.*<$tag>\\([^<]*\\)<\\/$tag>.*/\\1/p" | sed -n '1p'
+}
+
+save_if_sonos() {
+  local host="$1"
+  local xml manufacturer model friendly room
+
+  xml="$(xml_text "$host")"
+  [[ -n "$xml" ]] || return 1
+
+  manufacturer="$(printf '%s\n' "$xml" | xml_value manufacturer)"
+  model="$(printf '%s\n' "$xml" | xml_value modelName)"
+  friendly="$(printf '%s\n' "$xml" | xml_value friendlyName)"
+  room="$(printf '%s\n' "$xml" | xml_value roomName)"
+
+  if [[ "$manufacturer" == *Sonos* || "$model" == *Sonos* || "$friendly" == *Sonos* ]]; then
+    set_local_env SONOS_HOST "$host"
+    set_local_env SONOS_PORT "$sonos_port"
+    printf 'SONOS_HOST=%s\n' "$host"
+    printf 'SONOS_PORT=%s\n' "$sonos_port"
+    if [[ -n "$room" ]]; then
+      printf 'roomName=%s\n' "$room"
+    fi
+    if [[ -n "$model" ]]; then
+      printf 'modelName=%s\n' "$model"
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
+try_arp_candidates() {
+  local ip
+  while read -r ip; do
+    [[ -n "$ip" ]] || continue
+    save_if_sonos "$ip" && return 0
+  done < <(arp -a 2>/dev/null | sed -n 's/.*(\([0-9][0-9.]*\)).*/\1/p')
+
+  return 1
+}
+
+if [[ -n "${1:-}" ]]; then
+  save_if_sonos "$1" && exit 0
+  echo "error: $1 is not a Sonos speaker on port $sonos_port" >&2
+  exit 69
+fi
+
+if [[ -n "${SONOS_HOST:-}" ]]; then
+  save_if_sonos "$SONOS_HOST" && exit 0
+fi
+
+try_arp_candidates && exit 0
+
+scan_prefix="${TV_SCAN_PREFIX:-192.168.1}"
+for host in $(seq 1 254); do
+  ip="$scan_prefix.$host"
+
+  if port_open "$ip"; then
+    save_if_sonos "$ip" && exit 0
+  fi
+done
+
+echo "error: Sonos speaker not found on $scan_prefix.1-254:$sonos_port" >&2
+exit 69

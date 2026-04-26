@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/stremio-state [--serial SERIAL] [--json]
+USAGE
+}
+
+serial="$(tv_serial)"
+json=0
+
+json_escape() {
+  local value="$1"
+  value="${value//\\//\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+t0="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+elapsed_ms=0
+
+mark_elapsed() {
+  local now
+  now="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+  elapsed_ms=$((now - t0))
+  if (( ! json )); then
+    printf 'elapsed_ms=%s\n' "$elapsed_ms"
+  fi
+}
+
+status_out="$("$script_dir/stremio-status" --serial "$serial" --json)"
+has_stremio_session=false
+has_playing_state=false
+if printf '%s\n' "$status_out" | grep -q '"has_stremio_session":true'; then
+  has_stremio_session=true
+fi
+if printf '%s\n' "$status_out" | grep -q '"has_playing_state":true'; then
+  has_playing_state=true
+fi
+state="detail_or_other"
+marker=""
+
+if [[ "$has_stremio_session" == "true" ]] &&
+   [[ "$has_playing_state" == "true" ]]; then
+  state='player'
+  if (( ! json )); then
+    printf 'state=player\n'
+    printf 'source=status\n'
+  fi
+  mark_elapsed
+  if ((json)); then
+    printf '{'
+    printf '"result":"ok",'
+    printf '"state":"%s",' "$state"
+    printf '"source":"status",'
+    printf '"marker":"%s",' "$(json_escape "$marker")"
+    printf '"elapsed_ms":%s' "$elapsed_ms"
+    printf '}\n'
+  fi
+  exit 0
+fi
+
+xml="/sdcard/stremio-window-$$.xml"
+cleanup_xml() {
+  adb "${adb_args[@]}" shell rm -f "$xml" >/dev/null 2>&1 || true
+}
+trap cleanup_xml EXIT
+
+if adb "${adb_args[@]}" shell uiautomator dump "$xml" >/dev/null 2>&1; then
+  ui_text="$(adb "${adb_args[@]}" exec-out cat "$xml" 2>/dev/null || true)"
+  marker="$(printf '%s\n' "$ui_text" | grep -Eio 'Torrentio|StremThru|Comet|MediaFusion|DMM|AIOStreams' | head -n 1 || true)"
+  if [[ -n "$marker" ]]; then
+    state='stream_picker'
+    if (( ! json )); then
+      printf 'state=stream_picker\n'
+      printf 'source=uiautomator\n'
+      printf 'marker=%s\n' "$marker"
+    fi
+    mark_elapsed
+if ((json)); then
+  printf '{'
+  printf '"result":"ok",'
+  printf '"state":"%s",' "$state"
+  printf '"source":"uiautomator",'
+  printf '"marker":"%s",' "$(json_escape "$marker")"
+      printf '"elapsed_ms":%s' "$elapsed_ms"
+      printf '}\n'
+    fi
+    exit 0
+  fi
+fi
+
+if ((json)); then
+  mark_elapsed
+  printf '{'
+  printf '"result":"ok",'
+  printf '"state":"%s",' "$state"
+  printf '"source":"unknown",'
+  printf '"marker":"%s",' "$(json_escape "$marker")"
+  printf '"elapsed_ms":%s' "$elapsed_ms"
+  printf '}\n'
+else
+  printf 'state=detail_or_other\n'
+  printf 'source=unknown\n'
+  mark_elapsed
+fi

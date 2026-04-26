@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/play-stremio [--serial SERIAL] [--package PACKAGE] [--type movie|series] [--video-id VIDEO_ID] [--no-stop-media] [--no-press-ok] TARGET
+
+Open an explicit Stremio detail route on the Shield.
+
+TARGET may be a full stremio:///detail/... URL or a Stremio/IMDb id. When
+TARGET is an id, pass --type movie or --type series. For a specific series
+episode, pass --type series --video-id SERIES_ID:SEASON:EPISODE.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+                         Defaults to TV_ADB_SERIAL, then .tv-serial, then ADB's selected device.
+  -p, --package PACKAGE  Android package to receive the intent.
+                         Defaults to com.stremio.one.
+  --type TYPE            Required for bare ids. Must be movie or series.
+  --video-id VIDEO_ID    Series episode video id, such as tt1520211:11:24.
+  --no-stop-media        Do not force-stop known media apps before launch.
+  --launch-delay SECONDS Seconds to wait after force-stop before launch. Defaults to 1.
+  --no-press-ok          Do not press OK after opening the detail page.
+  --ok-delay SECONDS     Seconds to wait before the first OK. Defaults to 8.
+  --ok-count COUNT       Number of OK presses after opening. Defaults to 1.
+  --ok-gap SECONDS       Seconds between OK presses. Defaults to 1.
+  --dry-run              Print the adb command without invoking adb.
+  -h, --help             Show this help.
+
+Examples:
+  scripts/play-stremio --type movie tt0133093
+  scripts/play-stremio --type series tt1520211
+  scripts/play-stremio --type series --video-id tt1520211:11:24 tt1520211
+  scripts/play-stremio 'stremio:///detail/movie/tt0133093'
+USAGE
+}
+
+serial="$(tv_serial)"
+package="com.stremio.one"
+media_type=""
+video_id=""
+target=""
+dry_run=0
+stop_media=1
+launch_delay=1
+press_ok=1
+ok_delay=8
+ok_count=1
+ok_gap=1
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    -p|--package)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      package="$2"
+      shift 2
+      ;;
+    --type)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      case "$2" in
+        movie|series)
+          media_type="$2"
+          ;;
+        *)
+          echo "error: --type must be movie or series" >&2
+          exit 64
+          ;;
+      esac
+      shift 2
+      ;;
+    --video-id)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      video_id="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --no-stop-media)
+      stop_media=0
+      shift
+      ;;
+    --launch-delay)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      if [[ ! "$2" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "error: --launch-delay must be a non-negative number" >&2
+        exit 64
+      fi
+      launch_delay="$2"
+      shift 2
+      ;;
+    --no-press-ok)
+      press_ok=0
+      shift
+      ;;
+    --ok-delay)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      if [[ ! "$2" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "error: --ok-delay must be a non-negative number" >&2
+        exit 64
+      fi
+      ok_delay="$2"
+      shift 2
+      ;;
+    --ok-count)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+        echo "error: --ok-count must be a non-negative integer" >&2
+        exit 64
+      fi
+      ok_count="$2"
+      shift 2
+      ;;
+    --ok-gap)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      if [[ ! "$2" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "error: --ok-gap must be a non-negative number" >&2
+        exit 64
+      fi
+      ok_gap="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+    *)
+      if [[ -n "$target" ]]; then
+        echo "error: expected one Stremio URL or id, got extra argument: $1" >&2
+        exit 64
+      fi
+      target="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$target" && $# -gt 0 ]]; then
+  target="$1"
+  shift
+fi
+
+if [[ -z "$target" ]]; then
+  echo "error: missing Stremio URL or id" >&2
+  usage >&2
+  exit 64
+fi
+
+if (($# > 0)); then
+  echo "error: unexpected extra arguments: $*" >&2
+  exit 64
+fi
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+if [[ "$target" == stremio://* ]]; then
+  stremio_url="$target"
+else
+  if [[ -z "$media_type" ]]; then
+    echo "error: --type movie or --type series is required when TARGET is an id" >&2
+    exit 64
+  fi
+
+  if [[ "$media_type" == "movie" && -n "$video_id" ]]; then
+    echo "error: --video-id is only valid with --type series" >&2
+    exit 64
+  fi
+
+  if [[ "$media_type" == "series" && -n "$video_id" ]]; then
+    stremio_url="stremio:///detail/series/$target/$video_id"
+  else
+    stremio_url="stremio:///detail/$media_type/$target"
+  fi
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+remote_quote() {
+  printf "%q" "$1"
+}
+
+remote_command=$(
+  printf "am start -a %s -d %s -p %s" \
+    "$(remote_quote "android.intent.action.VIEW")" \
+    "$(remote_quote "$stremio_url")" \
+    "$(remote_quote "$package")"
+)
+
+command=(adb "${adb_args[@]}" shell "$remote_command")
+stop_target_package_command=(adb "${adb_args[@]}" shell am force-stop "$package")
+ok_command=(adb "${adb_args[@]}" shell input keyevent KEYCODE_DPAD_CENTER)
+
+if ((dry_run)); then
+  if ((stop_media)); then
+    "$script_dir/stop-media" "${adb_args[@]}" --dry-run
+    if [[ "$package" != "com.stremio.one" ]]; then
+      printf 'DRY RUN: '
+      printf '%q ' "${stop_target_package_command[@]}"
+      printf '\n'
+    fi
+    printf 'DRY RUN: sleep %q\n' "$launch_delay"
+  fi
+  printf 'DRY RUN: '
+  printf '%q ' "${command[@]}"
+  printf '\n'
+  if ((press_ok)); then
+    printf 'DRY RUN: sleep %q\n' "$ok_delay"
+    for ((i = 1; i <= ok_count; i++)); do
+      printf 'DRY RUN: '
+      printf '%q ' "${ok_command[@]}"
+      printf '\n'
+      if ((i < ok_count)); then
+        printf 'DRY RUN: sleep %q\n' "$ok_gap"
+      fi
+    done
+  fi
+  printf 'result=dry_run\n'
+  exit 0
+fi
+
+if ! command -v adb >/dev/null 2>&1; then
+  echo "error: adb is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+if ((stop_media)); then
+  "$script_dir/stop-media" "${adb_args[@]}"
+  if [[ "$package" != "com.stremio.one" ]]; then
+    "${stop_target_package_command[@]}" >/dev/null 2>&1 || true
+  fi
+  sleep "$launch_delay"
+fi
+
+"${command[@]}"
+
+if ((press_ok)); then
+  sleep "$ok_delay"
+  for ((i = 1; i <= ok_count; i++)); do
+    "${ok_command[@]}"
+    if ((i < ok_count)); then
+      sleep "$ok_gap"
+    fi
+  done
+fi
+printf 'result=success\n'

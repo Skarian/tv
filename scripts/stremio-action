@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/stremio-action [--serial SERIAL] [--dry-run] sequence 'back,right:2,ok'
+  scripts/stremio-action [--serial SERIAL] [--dry-run] right 3
+  scripts/stremio-action [--serial SERIAL] [--dry-run] left 1
+  scripts/stremio-action [--serial SERIAL] [--dry-run] ok
+  scripts/stremio-action [--serial SERIAL] [--dry-run] back
+USAGE
+}
+
+serial="$(tv_serial)"
+dry_run=0
+
+key_for() {
+  case "$1" in
+    back) printf 'KEYCODE_BACK' ;;
+    ok|select|enter) printf 'KEYCODE_DPAD_CENTER' ;;
+    right) printf 'KEYCODE_DPAD_RIGHT' ;;
+    left) printf 'KEYCODE_DPAD_LEFT' ;;
+    up) printf 'KEYCODE_DPAD_UP' ;;
+    down) printf 'KEYCODE_DPAD_DOWN' ;;
+    *) return 1 ;;
+  esac
+}
+
+append_key() {
+  local name="$1" count="${2:-1}" key
+  if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+    echo "error: count must be an integer" >&2
+    exit 64
+  fi
+  key="$(key_for "$name")" || {
+    echo "error: unknown action: $name" >&2
+    exit 64
+  }
+  for ((i = 0; i < count; i++)); do
+    commands+=("input keyevent $key")
+  done
+}
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if (($# == 0)); then
+  usage >&2
+  exit 64
+fi
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+commands=()
+case "$1" in
+  sequence)
+    if (($# != 2)); then
+      usage >&2
+      exit 64
+    fi
+    IFS=',' read -r -a parts <<< "$2"
+    for part in "${parts[@]}"; do
+      name="${part%%:*}"
+      count="1"
+      if [[ "$part" == *:* ]]; then
+        count="${part#*:}"
+      fi
+      append_key "$name" "$count"
+    done
+    ;;
+  right|left|up|down)
+    count="${2:-1}"
+    if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+      echo "error: count must be an integer" >&2
+      exit 64
+    fi
+    append_key "$1" "$count"
+    ;;
+  back|ok|select|enter)
+    append_key "$1" 1
+    ;;
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "error: unknown action: $1" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+t0="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+remote="${commands[0]}"
+for ((i = 1; i < ${#commands[@]}; i++)); do
+  remote+="; sleep 0.08; ${commands[$i]}"
+done
+
+if ((dry_run)); then
+  printf 'DRY RUN: '
+  printf '%q ' adb "${adb_args[@]}" shell "$remote"
+  printf '\n'
+  printf 'sent=%s\n' "$*"
+  printf 'elapsed_ms=0\n'
+  exit 0
+fi
+
+if ! command -v adb >/dev/null 2>&1; then
+  echo "error: adb is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+adb "${adb_args[@]}" shell "$remote" >/dev/null
+t1="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+
+printf 'sent=%s\n' "$*"
+printf 'elapsed_ms=%s\n' "$((t1 - t0))"

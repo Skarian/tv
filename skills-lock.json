@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "execplan-review": {
+      "source": "Skarian/codex-skills",
+      "ref": "main",
+      "sourceType": "github",
+      "computedHash": "c0bead49b8056bad10ca21163404b7354589d13ff62cdfbd549014c33736e9a5"
+    },
+    "precommit-review": {
+      "source": "Skarian/codex-skills",
+      "ref": "main",
+      "sourceType": "github",
+      "computedHash": "1f79352cadfb16818623ca3ae3d50cffcc41bdcded077ce95d8963a86c3cc190"
+    },
+    "reference-module": {
+      "source": "Skarian/codex-skills",
+      "ref": "main",
+      "sourceType": "github",
+      "computedHash": "8f6dae572301b5cf9c9ee16c9fb3fa060fb690a98f73000b0a4e8f1e45fee6fb"
+    }
+  }
+}

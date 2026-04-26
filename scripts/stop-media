@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+serial="$(tv_serial)"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/stop-media [--serial SERIAL] [--dry-run]
+
+Stop known media apps that may keep playing in the background.
+USAGE
+}
+
+dry_run=0
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+if (( ! dry_run )) && ! command -v adb >/dev/null 2>&1; then
+  echo "error: adb is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+for package in \
+  com.spotify.tv.android \
+  com.google.android.youtube.tv \
+  com.plexapp.android \
+  tv.emby.embyatv \
+  com.stremio.one \
+  com.neilturner.aerialviews \
+  org.videolan.vlc \
+  com.amazon.amazonvideo.livingroom; do
+  if ((dry_run)); then
+    printf 'DRY RUN: '
+    printf '%q ' adb "${adb_args[@]}" shell am force-stop "$package"
+    printf '\n'
+    continue
+  fi
+  adb "${adb_args[@]}" shell am force-stop "$package" >/dev/null 2>&1 || true
+done

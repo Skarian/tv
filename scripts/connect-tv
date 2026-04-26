@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/connect-tv [SERIAL]
+
+Verify and save the Shield adb target. If SERIAL is omitted, try the saved
+target first, then scan TV_SCAN_PREFIX.1-254 for an NVIDIA Shield on port 5555.
+
+Environment:
+  TV_SCAN_PREFIX  IPv4 /24 prefix to scan. Defaults to 192.168.1.
+USAGE
+}
+
+if (($# > 1)); then
+  usage >&2
+  exit 64
+fi
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  -*)
+    echo "error: unknown option: $1" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+if ! command -v adb >/dev/null 2>&1; then
+  echo "error: adb is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+if ! command -v nc >/dev/null 2>&1; then
+  echo "error: nc is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+save_if_shield() {
+  local serial="$1"
+
+  local connect_output connect_pid waited=0
+  connect_output="$(mktemp "${TMPDIR:-/tmp}/connect-tv.XXXXXX")"
+  adb connect "$serial" >"$connect_output" 2>&1 &
+  connect_pid=$!
+
+  while kill -0 "$connect_pid" 2>/dev/null; do
+    if ((waited >= 5)); then
+      kill "$connect_pid" 2>/dev/null || true
+      wait "$connect_pid" 2>/dev/null || true
+      rm -f "$connect_output"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if ! wait "$connect_pid"; then
+    rm -f "$connect_output"
+    return 1
+  fi
+  rm -f "$connect_output"
+
+  local manufacturer model device
+  manufacturer="$(adb -s "$serial" shell getprop ro.product.manufacturer 2>/dev/null | tr -d '\r' || true)"
+  model="$(adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r' || true)"
+  device="$(adb -s "$serial" shell getprop ro.product.device 2>/dev/null | tr -d '\r' || true)"
+
+  if [[ "$manufacturer" == "NVIDIA" && "$model" == *"SHIELD"* && "$device" == "mdarcy" ]]; then
+    printf '%s\n' "$serial" > "$tv_serial_file"
+    set_local_env TV_ADB_SERIAL "$serial"
+    printf 'TV_ADB_SERIAL=%s\n' "$serial"
+    return 0
+  fi
+
+  return 1
+}
+
+port_open() {
+  local ip="$1"
+
+  if nc -z -w 1 "$ip" 5555 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if nc -G 1 -z "$ip" 5555 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+try_serials_from_adb() {
+  local serial
+  while read -r serial _rest; do
+    [[ "$serial" == *:5555 ]] || continue
+    save_if_shield "$serial" && return 0
+  done < <(adb devices -l 2>/dev/null | sed '1d')
+
+  return 1
+}
+
+try_arp_candidates() {
+  local ip serial
+  while read -r ip; do
+    [[ -n "$ip" ]] || continue
+    serial="$ip:5555"
+    save_if_shield "$serial" && return 0
+  done < <(arp -a 2>/dev/null | sed -n 's/.*(\([0-9][0-9.]*\)).*/\1/p')
+
+  return 1
+}
+
+if [[ -n "${1:-}" ]]; then
+  save_if_shield "$1" && exit 0
+  echo "error: $1 is not the Shield" >&2
+  exit 69
+fi
+
+known_serial="$(tv_serial)"
+if [[ -n "$known_serial" ]]; then
+  save_if_shield "$known_serial" && exit 0
+fi
+
+try_serials_from_adb && exit 0
+try_arp_candidates && exit 0
+
+scan_prefix="${TV_SCAN_PREFIX:-192.168.1}"
+for host in $(seq 1 254); do
+  ip="$scan_prefix.$host"
+  serial="$ip:5555"
+
+  if port_open "$ip"; then
+    save_if_shield "$serial" && exit 0
+  fi
+done
+
+echo "error: Shield not found on $scan_prefix.1-254:5555" >&2
+exit 69

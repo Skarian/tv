@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/uninstall-termux [--dry-run] [--yes]
+
+Uninstall Termux packages managed by this repo's setup script.
+
+This script removes only the explicitly managed repo packages. It does not
+remove baseline Termux tools such as bash, curl, or ca-certificates, and it does
+not run autoremove.
+
+Managed packages:
+  jq
+  android-tools
+  netcat-openbsd
+  python-yt-dlp
+  shellcheck
+  ripgrep
+  perl
+  imagemagick
+
+Options:
+  --dry-run      Print the package-manager command without running it. Default.
+  --yes          Actually run the uninstall command.
+  -h, --help     Show this help.
+USAGE
+}
+
+dry_run=1
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+managed_packages_file="$repo_root/.agent/state/termux-installed-packages"
+
+while (($#)); do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --yes)
+      dry_run=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+if ! command -v pkg >/dev/null 2>&1; then
+  echo "error: Termux pkg is not on PATH; run this script inside Termux" >&2
+  exit 69
+fi
+
+if [[ ! -f "$managed_packages_file" ]]; then
+  echo "No repo install record found at $managed_packages_file."
+  echo "Nothing will be uninstalled."
+  exit 0
+fi
+
+packages=()
+while IFS= read -r package_name || [[ -n "$package_name" ]]; do
+  [[ -n "$package_name" ]] || continue
+  case "$package_name" in
+    jq|android-tools|netcat-openbsd|python-yt-dlp|shellcheck|ripgrep|perl|imagemagick)
+      packages+=("$package_name")
+      ;;
+    *)
+      echo "warning: ignoring unknown package in install record: $package_name" >&2
+      ;;
+  esac
+done < "$managed_packages_file"
+
+if ((${#packages[@]} == 0)); then
+  echo "No valid repo-managed packages are recorded."
+  exit 0
+fi
+
+installed_packages=()
+
+for package_name in "${packages[@]}"; do
+  if dpkg -s "$package_name" >/dev/null 2>&1; then
+    installed_packages+=("$package_name")
+  fi
+done
+
+if ((${#installed_packages[@]} == 0)); then
+  echo "No managed Termux packages are installed."
+  exit 0
+fi
+
+if ((dry_run)); then
+  printf 'DRY RUN: pkg uninstall -y'
+  printf ' %q' "${installed_packages[@]}"
+  printf '\n'
+  echo "Pass --yes to uninstall these packages."
+  exit 0
+fi
+
+pkg uninstall -y "${installed_packages[@]}"
+rm -f "$managed_packages_file"
+
+echo "Termux uninstall complete."

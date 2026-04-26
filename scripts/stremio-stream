@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/stremio-stream [--serial SERIAL] [--dry-run] [--json] next [COUNT] [--confirm]
+  scripts/stremio-stream [--serial SERIAL] [--dry-run] [--json] prev [COUNT] [--confirm]
+  scripts/stremio-stream [--serial SERIAL] [--dry-run] [--json] right [COUNT] [--confirm]
+  scripts/stremio-stream [--serial SERIAL] [--dry-run] [--json] left [COUNT] [--confirm]
+  scripts/stremio-stream [--serial SERIAL] [--dry-run] [--json] --type movie|series --id ID [--video-id VIDEO_ID] next [COUNT] [--confirm]
+
+Context-free Stremio stream shifter. It acts only when the current TV state is
+the Stremio player or stream picker. If optional media context is provided, it
+can relaunch that media when the current state is neither.
+USAGE
+}
+
+media_type=""
+id=""
+video_id=""
+title=""
+confirm=0
+dry_run=0
+json=0
+serial="$(tv_serial)"
+direction=""
+count="1"
+count_set=0
+state=""
+action="not_sent"
+confirmed=0
+state_ms=0
+switch_ms=0
+confirm_ms=0
+
+json_escape() {
+  local value="$1"
+  value="${value//\\//\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run) dry_run=1; shift ;;
+    --json) json=1; shift ;;
+    --type)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      media_type="$2"
+      shift 2
+      ;;
+    --id)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      id="$2"
+      shift 2
+      ;;
+    --video-id)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      video_id="$2"
+      shift 2
+      ;;
+    --title)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      title="$2"
+      shift 2
+      ;;
+    --confirm) confirm=1; shift ;;
+    next|right|prev|previous|left|last)
+      if [[ -n "$direction" ]]; then
+        echo "error: direction provided more than once" >&2
+        exit 64
+      fi
+      direction="$1"
+      shift
+      if (($# > 0)) && [[ "$1" =~ ^[0-9]+$ ]]; then
+        count="$1"
+        count_set=1
+        shift
+      fi
+      ;;
+    [0-9]*)
+      if [[ "$1" =~ ^[0-9]+$ && -n "$direction" && "$count_set" == 0 ]]; then
+        count="$1"
+        count_set=1
+        shift
+      else
+        echo "error: unknown option: $1" >&2
+        usage >&2
+        exit 64
+      fi
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+case "$direction" in
+  next|right|"") direction="right" ;;
+  prev|previous|left|last) direction="left" ;;
+esac
+
+if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+  echo "error: count must be an integer" >&2
+  exit 64
+fi
+
+if [[ -n "$media_type" || -n "$id" || -n "$video_id" ]]; then
+  if [[ -z "$media_type" || -z "$id" ]]; then
+    echo "error: --type and --id must be provided together" >&2
+    exit 64
+  fi
+fi
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+serial_args=(--serial "$serial")
+
+t0="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+mark() {
+  local now
+  now="$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')"
+  local delta=$((now - t0))
+
+  case "$1" in
+    state_done)
+      state_ms=$delta
+      ;;
+    switch_not_sent|switch_sent)
+      switch_ms=$delta
+      ;;
+    confirm_done|confirm_skipped)
+      confirm_ms=$delta
+      ;;
+  esac
+
+  if (( ! json )); then
+    printf '%s_ms=%s\n' "$1" "$delta"
+  fi
+}
+
+emit_json_result() {
+  local state_out="$1"
+  local action_out="$2"
+  local confirmed_out="$3"
+
+  printf '{'
+  printf '"result":"ok",'
+  printf '"dry_run":false,'
+  printf '"state":"%s",' "$(json_escape "$state_out")"
+  printf '"action":"%s",' "$(json_escape "$action_out")"
+  printf '"direction":"%s",' "$direction"
+  printf '"count":%s,' "$count"
+  printf '"title":"%s",' "$(json_escape "$title")"
+  printf '"confirmed":%s,' "$confirmed_out"
+  printf '"state_ms":%s,' "$state_ms"
+  printf '"switch_sent_ms":%s,' "$switch_ms"
+  printf '"confirm_ms":%s' "$confirm_ms"
+  printf '}\n'
+}
+
+if ((dry_run)); then
+  if ((json)); then
+    action="not_sent"
+    confirmed=0
+    printf '{'
+    printf '"result":"dry_run",'
+    printf '"dry_run":true,'
+    printf '"state":"%s",' "$(json_escape "$state")"
+    printf '"action":"%s",' "$(json_escape "$action")"
+    printf '"direction":"%s",' "$direction"
+    printf '"count":%s,' "$count"
+    printf '"title":"%s",' "$(json_escape "$title")"
+    printf '"confirmed":false,'
+    printf '"state_ms":%s,' "$state_ms"
+    printf '"switch_sent_ms":%s,' "$switch_ms"
+    printf '"confirm_ms":%s' "$confirm_ms"
+    printf '}\n'
+    exit 0
+  fi
+
+  printf 'DRY RUN: inspect Stremio state with %q %q %q\n' "$script_dir/stremio-state" "--serial" "$serial"
+  printf 'DRY RUN: if state=player, send %q\n' "back,$direction:$count,ok"
+  printf 'DRY RUN: if state=stream_picker, send %q\n' "$direction:$count,ok"
+  if [[ -n "$media_type" && -n "$id" ]]; then
+    printf 'DRY RUN: if state=detail_or_other, relaunch %s %s then send %q\n' "$media_type" "$id" "$direction:$count,ok"
+  fi
+  printf 'action=not_sent\n'
+  mark switch_not_sent
+  printf 'confirmed=skipped\n'
+  exit 0
+fi
+
+state_out="$("$script_dir/stremio-state" "${serial_args[@]}")"
+mark state_done
+if (( ! json )); then
+  printf '%s\n' "$state_out"
+fi
+state="$(printf '%s\n' "$state_out" | sed -n 's/^state=//p' | head -n 1)"
+
+case "$state" in
+  player)
+    "$script_dir/stremio-action" "${serial_args[@]}" sequence "back,$direction:$count,ok" >/dev/null
+    action="back,$direction:$count,ok"
+    ;;
+  stream_picker)
+    "$script_dir/stremio-action" "${serial_args[@]}" sequence "$direction:$count,ok" >/dev/null
+    action="$direction:$count,ok"
+    ;;
+  *)
+    if [[ -z "$media_type" || -z "$id" ]]; then
+      action="needs_media_context"
+      if ((json)); then
+        mark switch_not_sent
+        state="detail_or_other"
+        emit_json_result "$state" "$action" false
+        exit 65
+      fi
+      printf 'action=%s\n' "$action"
+      mark switch_not_sent
+      exit 65
+    fi
+    args=("${serial_args[@]}" --type "$media_type" --no-press-ok)
+    if [[ -n "$video_id" ]]; then
+      args+=(--video-id "$video_id")
+    fi
+    "$script_dir/play-stremio" "${args[@]}" "$id" >/dev/null
+    sleep 5
+    "$script_dir/stremio-action" "${serial_args[@]}" sequence "$direction:$count,ok" >/dev/null
+    action="relaunch,$direction:$count,ok"
+    ;;
+esac
+
+if (( ! json )); then
+  printf 'action=%s\n' "$action"
+fi
+mark switch_sent
+
+if ((confirm == 0)); then
+  confirmed=0
+  if ((json)); then
+    mark confirm_skipped
+    emit_json_result "$state" "$action" false
+    exit 0
+  fi
+  printf 'confirmed=skipped\n'
+  exit 0
+fi
+
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 1
+  poll_out="$("$script_dir/stremio-status" "${serial_args[@]}")"
+  if printf '%s\n' "$poll_out" | grep -q 'state=PlaybackState {state=3'; then
+    if [[ -z "$title" ]] || printf '%s\n' "$poll_out" | grep -qi "$title"; then
+      confirmed=1
+      if ((json)); then
+        mark confirm_done
+        emit_json_result "$state" "$action" true
+        exit 0
+      fi
+      printf 'confirmed=1\n'
+      mark confirm_done
+      printf '%s\n' "$poll_out"
+      exit 0
+    fi
+  fi
+done
+
+confirmed=0
+if ((json)); then
+  mark confirm_done
+  emit_json_result "$state" "$action" false
+  exit 1
+fi
+
+printf 'confirmed=0\n'
+mark confirm_done
+printf '%s\n' "$poll_out"
+exit 1

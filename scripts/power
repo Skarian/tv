@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/power [--serial SERIAL] [--dry-run] [--json] [--timeout SECONDS] COMMAND
+
+Control Shield / TV power over ADB.
+
+Commands:
+  status      Print Shield wakefulness and display power state.
+  on          Wake the Shield / TV using KEYCODE_WAKEUP.
+  off         Turn the Shield / TV off using KEYCODE_POWER.
+  toggle      Toggle power using KEYCODE_POWER.
+  help        Show this help.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+                         Defaults to TV_ADB_SERIAL, then .tv-serial, then ADB's selected device.
+  --dry-run              Print the adb command without invoking adb.
+  --json                 Emit machine-readable status/result output.
+  --timeout SECONDS      Max seconds to wait for on/off confirmation. Defaults to 20.
+USAGE
+}
+
+serial="$(tv_serial)"
+dry_run=0
+json=0
+timeout=20
+command=""
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      (($# >= 2)) || die "$1 requires a value"
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    --timeout)
+      (($# >= 2)) || die "$1 requires a value"
+      [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--timeout must be a non-negative number"
+      timeout="$2"
+      shift 2
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -n "$command" ]]; then
+        echo "error: unexpected extra arguments: $*" >&2
+        exit 64
+      fi
+      command="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$command" ]]; then
+  usage >&2
+  exit 64
+fi
+
+case "$command" in
+  status|on|off|toggle)
+    ;;
+  *)
+    echo "error: unknown command: $command" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+emit_json() {
+  local result="$1"
+  local action="$2"
+  local wakefulness="$3"
+  local display="$4"
+  local elapsed_ms="${5:-0}"
+  local timed_out="${6:-false}"
+  local command_text="${7:-}"
+
+  printf '{'
+  printf '"result":"%s",' "$(json_escape "$result")"
+  printf '"action":"%s",' "$(json_escape "$action")"
+  printf '"wakefulness":"%s",' "$(json_escape "$wakefulness")"
+  printf '"display":"%s",' "$(json_escape "$display")"
+  printf '"elapsed_ms":%s,' "$elapsed_ms"
+  printf '"timed_out":%s' "$timed_out"
+  if [[ -n "$command_text" ]]; then
+    printf ',"command":"%s"' "$(json_escape "$command_text")"
+  fi
+  printf '}\n'
+}
+
+read_power_state() {
+  local output
+  output="$(adb "${adb_args[@]}" shell dumpsys power)"
+  wakefulness="$(sed -n 's/^  mWakefulness=//p' <<<"$output" | sed -n '1p')"
+  display="$(sed -n 's/^Display Power: state=//p' <<<"$output" | sed -n '1p')"
+}
+
+need_adb() {
+  if ! command -v adb >/dev/null 2>&1; then
+    echo "error: adb is not installed or is not on PATH" >&2
+    exit 69
+  fi
+}
+
+print_status() {
+  read_power_state
+  if ((json)); then
+    emit_json ok status "$wakefulness" "$display" 0 false
+    return
+  fi
+  printf 'wakefulness=%s\n' "$wakefulness"
+  printf 'display=%s\n' "$display"
+}
+
+now_ms() {
+  perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000'
+}
+
+shell_command_string() {
+  local quoted out="" arg
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    if [[ -n "$out" ]]; then
+      out+=" "
+    fi
+    out+="$quoted"
+  done
+  printf '%s' "$out"
+}
+
+sleep_for_attempt() {
+  local attempt="$1"
+  case "$attempt" in
+    0) sleep 0.15 ;;
+    1) sleep 0.25 ;;
+    2) sleep 0.5 ;;
+    3) sleep 1 ;;
+    4) sleep 1.5 ;;
+    *) sleep 2 ;;
+  esac
+}
+
+state_matches() {
+  local desired="$1"
+  case "$desired" in
+    on)
+      [[ "$wakefulness" == "Awake" && "$display" == "ON" ]]
+      ;;
+    off)
+      [[ "$wakefulness" == "Asleep" && "$display" == "OFF" ]]
+      ;;
+  esac
+}
+
+wait_for_state() {
+  local desired="$1"
+  local start deadline elapsed attempt=0
+  start="$(now_ms)"
+  deadline="$(perl -MTime::HiRes=time -e "printf \"%.0f\", (time()+$timeout)*1000")"
+
+  while :; do
+    read_power_state
+    elapsed=$(($(now_ms) - start))
+    if state_matches "$desired"; then
+      if ((json)); then
+        emit_json success "$command" "$wakefulness" "$display" "$elapsed" false
+      else
+        printf 'result=success\n'
+        printf 'wakefulness=%s\n' "$wakefulness"
+        printf 'display=%s\n' "$display"
+        printf 'elapsed_ms=%s\n' "$elapsed"
+      fi
+      return 0
+    fi
+
+    if (($(now_ms) >= deadline)); then
+      if ((json)); then
+        emit_json timeout "$command" "$wakefulness" "$display" "$elapsed" true
+      else
+        printf 'result=timeout\n'
+        printf 'wakefulness=%s\n' "$wakefulness"
+        printf 'display=%s\n' "$display"
+        printf 'elapsed_ms=%s\n' "$elapsed"
+      fi
+      return 65
+    fi
+
+    sleep_for_attempt "$attempt"
+    attempt=$((attempt + 1))
+  done
+}
+
+send_keyevent() {
+  local key="$1"
+  if ((dry_run)); then
+    if ((json)); then
+      emit_json dry_run "$command" "" "" 0 false "$(shell_command_string adb "${adb_args[@]}" shell input keyevent "$key")"
+    else
+      printf 'DRY RUN: '
+      printf '%q ' adb "${adb_args[@]}" shell input keyevent "$key"
+      printf '\n'
+      printf 'result=dry_run\n'
+    fi
+    return
+  fi
+
+  need_adb
+  adb "${adb_args[@]}" shell input keyevent "$key"
+}
+
+case "$command" in
+  status)
+    if ((dry_run)); then
+      if ((json)); then
+        emit_json dry_run status "" "" 0 false "$(shell_command_string adb "${adb_args[@]}" shell dumpsys power)"
+      else
+        printf 'DRY RUN: '
+        printf '%q ' adb "${adb_args[@]}" shell dumpsys power
+        printf '\n'
+      fi
+      exit 0
+    fi
+    need_adb
+    print_status
+    ;;
+  on)
+    send_keyevent KEYCODE_WAKEUP
+    ((dry_run)) && exit 0
+    wait_for_state on
+    ;;
+  off)
+    if ((dry_run)); then
+      inspect_command="$(shell_command_string adb "${adb_args[@]}" shell dumpsys power)"
+      power_command="$(shell_command_string adb "${adb_args[@]}" shell input keyevent KEYCODE_POWER)"
+      if ((json)); then
+        emit_json dry_run off "" "" 0 false "$inspect_command; if not Asleep/OFF: $power_command"
+      else
+        printf 'DRY RUN: inspect state with %s\n' "$inspect_command"
+        printf 'DRY RUN: if not already Asleep/OFF, run %s\n' "$power_command"
+        printf 'result=dry_run\n'
+      fi
+      exit 0
+    fi
+    need_adb
+    read_power_state
+    if state_matches off; then
+      if ((json)); then
+        emit_json success off "$wakefulness" "$display" 0 false
+      else
+        printf 'result=success\n'
+        printf 'wakefulness=%s\n' "$wakefulness"
+        printf 'display=%s\n' "$display"
+        printf 'elapsed_ms=0\n'
+      fi
+      exit 0
+    fi
+    send_keyevent KEYCODE_POWER
+    ((dry_run)) && exit 0
+    wait_for_state off
+    ;;
+  toggle)
+    send_keyevent KEYCODE_POWER
+    ((dry_run)) && exit 0
+    read_power_state
+    if ((json)); then
+      emit_json success toggle "$wakefulness" "$display" 0 false
+    else
+      printf 'result=success\n'
+      printf 'wakefulness=%s\n' "$wakefulness"
+      printf 'display=%s\n' "$display"
+    fi
+    ;;
+esac

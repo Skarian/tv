@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/install-termux [--dry-run]
+
+Install Termux packages needed to run this repo from a Codex agent on Android.
+
+This script assumes a normal Termux environment and does not install baseline
+Termux tools such as bash, curl, or ca-certificates. It installs only missing
+commands that are repo-specific or not guaranteed in base Termux, using Termux
+package names where they differ from command names.
+
+Managed commands:
+  - jq         -> jq
+  - adb        -> android-tools
+  - nc         -> netcat-openbsd
+  - yt-dlp     -> python-yt-dlp
+  - shellcheck -> shellcheck
+  - rg         -> ripgrep
+  - perl       -> perl
+  - magick     -> imagemagick
+
+Options:
+  --dry-run      Print the package-manager command without running it.
+  -h, --help     Show this help.
+USAGE
+}
+
+dry_run=0
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+state_dir="$repo_root/.agent/state"
+managed_packages_file="$state_dir/termux-installed-packages"
+
+while (($#)); do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+run() {
+  if ((dry_run)); then
+    printf 'DRY RUN: '
+    printf '%q ' "$@"
+    printf '\n'
+    return
+  fi
+
+  "$@"
+}
+
+check_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "error: $command_name is not on PATH after setup" >&2
+    return 1
+  fi
+}
+
+install_termux() {
+  if ! command -v pkg >/dev/null 2>&1; then
+    echo "error: Termux pkg is not on PATH; run this script inside Termux" >&2
+    exit 69
+  fi
+
+  local specs=(
+    jq:jq
+    adb:android-tools
+    nc:netcat-openbsd
+    yt-dlp:python-yt-dlp
+    shellcheck:shellcheck
+    rg:ripgrep
+    perl:perl
+    magick:imagemagick
+  )
+  local missing_packages=()
+  local spec command_name package_name
+
+  for spec in "${specs[@]}"; do
+    command_name="${spec%%:*}"
+    package_name="${spec#*:}"
+
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      missing_packages+=("$package_name")
+    fi
+  done
+
+  if ((${#missing_packages[@]} == 0)); then
+    echo "Termux dependencies already present."
+    return
+  fi
+
+  run pkg update
+  if ! run pkg install -y "${missing_packages[@]}"; then
+    echo "error: Termux package install failed; review the package-manager output above" >&2
+    exit 69
+  fi
+
+  if (( ! dry_run )); then
+    mkdir -p "$state_dir"
+    printf '%s\n' "${missing_packages[@]}" >> "$managed_packages_file"
+    sort -u "$managed_packages_file" -o "$managed_packages_file"
+  fi
+}
+
+check_managed_commands() {
+  local missing=0
+
+  for command_name in jq adb nc yt-dlp shellcheck rg perl magick; do
+    check_command "$command_name" || missing=1
+  done
+
+  if ((missing)); then
+    echo "error: setup did not produce all managed repo commands" >&2
+    exit 69
+  fi
+}
+
+install_termux
+
+if (( ! dry_run )); then
+  check_managed_commands
+fi
+
+echo "Termux setup complete."

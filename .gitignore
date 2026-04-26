@@ -1,0 +1,22 @@
+.tv-serial
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime output
+*.log
+tmp/
+temp/
+
+# Agent session history
+.agent/CONTINUITY.md
+.agent/state/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

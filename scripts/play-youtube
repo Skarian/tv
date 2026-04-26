@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/play-youtube [--serial SERIAL] [--package PACKAGE] [--no-stop-media] VIDEO_ID_OR_URL
+
+Launch a YouTube video on an Android TV device through adb.
+
+Options:
+  -s, --serial SERIAL    adb device serial or HOST:PORT.
+                         Defaults to TV_ADB_SERIAL, then .tv-serial, then ADB's selected device.
+  -p, --package PACKAGE  Android package to receive the intent.
+                         Defaults to com.google.android.youtube.tv.
+  --no-stop-media        Do not force-stop known media apps before launch.
+  --dry-run              Print the adb command without invoking adb.
+  -h, --help             Show this help.
+
+Examples:
+  scripts/play-youtube dQw4w9WgXcQ
+  scripts/play-youtube 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+  TV_ADB_SERIAL=TV_IP:5555 scripts/play-youtube dQw4w9WgXcQ
+USAGE
+}
+
+serial="$(tv_serial)"
+package="com.google.android.youtube.tv"
+target=""
+dry_run=0
+stop_media=1
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    -p|--package)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      package="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --no-stop-media)
+      stop_media=0
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+    *)
+      if [[ -n "$target" ]]; then
+        echo "error: expected one video id or URL, got extra argument: $1" >&2
+        exit 64
+      fi
+      target="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$target" && $# -gt 0 ]]; then
+  target="$1"
+  shift
+fi
+
+if [[ -z "$target" ]]; then
+  echo "error: missing YouTube video id or URL" >&2
+  usage >&2
+  exit 64
+fi
+
+if (($# > 0)); then
+  echo "error: unexpected extra arguments: $*" >&2
+  exit 64
+fi
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+if [[ "$target" =~ ^https?:// ]]; then
+  url="$target"
+else
+  url="https://www.youtube.com/watch?v=$target"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+remote_quote() {
+  printf "%q" "$1"
+}
+
+remote_command=$(
+  printf "am start -a %s -d %s -p %s" \
+    "$(remote_quote "android.intent.action.VIEW")" \
+    "$(remote_quote "$url")" \
+    "$(remote_quote "$package")"
+)
+
+command=(adb "${adb_args[@]}" shell "$remote_command")
+
+if ((dry_run)); then
+  if ((stop_media)); then
+    "$script_dir/stop-media" "${adb_args[@]}" --dry-run
+  fi
+  printf 'DRY RUN: '
+  printf '%q ' "${command[@]}"
+  printf '\n'
+  printf 'result=dry_run\n'
+  exit 0
+fi
+
+if ! command -v adb >/dev/null 2>&1; then
+  echo "error: adb is not installed or is not on PATH" >&2
+  exit 69
+fi
+
+if ((stop_media)); then
+  "$script_dir/stop-media" "${adb_args[@]}"
+fi
+
+"${command[@]}"
+printf 'result=success\n'

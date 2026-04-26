@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/tv-target.sh
+source "$script_dir/lib/tv-target.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/stremio-screenshot [--serial SERIAL] [--dry-run] [--keep-raw] full|streams OUT.png
+
+Fast screenshot helper for Stremio debugging. Captures raw framebuffer, then
+downscales or crops locally with ImageMagick.
+
+Assumes the Shield framebuffer is 3840x2160 RGBA.
+USAGE
+}
+
+serial="$(tv_serial)"
+dry_run=0
+keep_raw=0
+mode=""
+out=""
+
+while (($#)); do
+  case "$1" in
+    -s|--serial)
+      if (($# < 2)); then
+        echo "error: $1 requires a value" >&2
+        exit 64
+      fi
+      serial="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --keep-raw)
+      keep_raw=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z "$mode" ]]; then
+        mode="$1"
+      elif [[ -z "$out" ]]; then
+        out="$1"
+      else
+        echo "error: unexpected extra argument: $1" >&2
+        exit 64
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$mode" || -z "$out" || "$mode" == "-h" || "$mode" == "--help" ]]; then
+  usage
+  exit 64
+fi
+
+case "$mode" in
+  full|streams) ;;
+  *) echo "error: mode must be full or streams" >&2; exit 64 ;;
+esac
+
+if [[ -z "$serial" ]]; then
+  serial="$(require_tv_serial)"
+fi
+
+adb_args=()
+if [[ -n "$serial" ]]; then
+  adb_args=(-s "$serial")
+fi
+
+raw="${out%.*}.raw"
+
+if ((dry_run)); then
+  printf 'DRY RUN: '
+  printf '%q ' adb "${adb_args[@]}" exec-out screencap '>' "$raw"
+  printf '\n'
+  printf 'DRY RUN: magick raw framebuffer -> %q\n' "$out"
+  exit 0
+fi
+
+if ! command -v magick >/dev/null 2>&1; then
+  echo "error: magick is required" >&2
+  exit 69
+fi
+
+adb "${adb_args[@]}" exec-out screencap > "$raw"
+if ((keep_raw == 0)); then
+  trap 'rm -f "$raw"' EXIT
+fi
+
+case "$mode" in
+  full)
+    magick -size 3840x2160 -depth 8 rgba:"$raw" -resize 960x540 "$out"
+    ;;
+  streams)
+    magick -size 3840x2160 -depth 8 rgba:"$raw" -crop 3840x900+0+1260 -resize 1280x300 "$out"
+    ;;
+esac
