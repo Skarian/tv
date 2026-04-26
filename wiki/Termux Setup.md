@@ -18,6 +18,11 @@ When it installs packages, it records only those package names in ignored local
 state at `.agent/state/termux-installed-packages`. The uninstall script uses
 that record so it does not remove tools the user already had before this repo.
 
+Packages are installed one at a time so Termux/dpkg failures identify the exact
+package that failed. The `apt` stable-CLI warning from Termux is harmless; the
+important failure line is the named package printed immediately before the
+error.
+
 The setup script does not install `ca-certificates` directly. Termux's OpenSSL
 package depends on `ca-certificates`, and common HTTPS tooling such as `curl`
 reaches it through Termux's own package dependency graph.

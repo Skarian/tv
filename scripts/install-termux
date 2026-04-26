@@ -106,16 +106,23 @@ install_termux() {
   fi
 
   run pkg update
-  if ! run pkg install -y "${missing_packages[@]}"; then
-    echo "error: Termux package install failed; review the package-manager output above" >&2
-    exit 69
-  fi
 
-  if (( ! dry_run )); then
-    mkdir -p "$state_dir"
-    printf '%s\n' "${missing_packages[@]}" >> "$managed_packages_file"
-    sort -u "$managed_packages_file" -o "$managed_packages_file"
-  fi
+  local installed_packages=()
+  for package_name in "${missing_packages[@]}"; do
+    echo "Installing Termux package: $package_name"
+    if ! run pkg install -y "$package_name"; then
+      echo "error: failed to install Termux package: $package_name" >&2
+      echo "error: review the package-manager output above for the dpkg failure" >&2
+      exit 69
+    fi
+    installed_packages+=("$package_name")
+
+    if (( ! dry_run )); then
+      mkdir -p "$state_dir"
+      printf '%s\n' "$package_name" >> "$managed_packages_file"
+      sort -u "$managed_packages_file" -o "$managed_packages_file"
+    fi
+  done
 }
 
 check_managed_commands() {
