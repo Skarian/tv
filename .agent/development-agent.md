@@ -73,8 +73,8 @@ Do not mark played or tested media as liked, preferred, or favorite unless the u
 ## Dependencies And Host Policy
 
 - Do not install host packages.
-- Termux setup is handled by `scripts/install-termux`.
-- Termux uninstall is handled by `scripts/uninstall-termux`.
+- Dispatch-owned Termux packages are declared in `.dispatch/termux-dependencies.json`.
+- `scripts/install-termux` and `scripts/uninstall-termux` are manual fallback helpers only.
 - If tooling such as `shellcheck` is missing, say so and provide the command the user can run.
 - Do not reintroduce generic Debian/apt support unless the user explicitly asks.
 

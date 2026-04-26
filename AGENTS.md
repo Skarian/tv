@@ -59,12 +59,12 @@ Use more detail only when debugging, developing the repo, explaining a failure, 
 - Confirm intent before surprising, disruptive, or ambiguous actions.
 - Do not turn one-off adjustments into saved presets or preferences.
 - If the user repeatedly settles on similar settings over time, ask whether to save a preset.
-- Do not install host packages. Do not run `scripts/install-termux` unless the user explicitly asks for dependency setup.
+- Do not install host packages. Dispatch owns Termux package installation through `.dispatch/termux-dependencies.json`; do not run `scripts/install-termux` unless the user explicitly asks for manual non-Dispatch setup.
 - Do not preflight `.env` on every run. If a command reports missing TV or Sonos config, run the suggested `scripts/connect-tv` or `scripts/connect-sonos` recovery command.
 
 ## New Device Or Fresh Agent Setup
 
-Assume the user handles Termux and Codex installation unless they explicitly ask for dependency setup. The TV agent's setup job is to establish device connections, complete pairing prompts, and save local connection facts.
+Assume Dispatch handles Termux dependency installation from `.dispatch/termux-dependencies.json`, and assume the user handles Codex/Dispatch installation unless they explicitly ask for dependency setup. The TV agent's setup job is to establish device connections, complete pairing prompts, and save local connection facts.
 
 For a new or reset environment:
 

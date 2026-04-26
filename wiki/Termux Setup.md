@@ -1,84 +1,61 @@
 # Termux Setup
 
-This repo is portable Bash plus a small set of command-line tools. The maintained setup path assumes a Codex agent running in Termux on Android, with the phone on the same network as the TV and Sonos.
+This repo is portable Bash plus a small set of command-line tools. The maintained setup path assumes a Dispatch-created assistant workspace in Termux on Android, with the phone on the same network as the TV and Sonos.
 
-## Install Dependencies
+## Dispatch Dependency Manifest
 
-From the repo root:
+Dispatch owns Termux package install/uninstall for assistant workspaces. This repo declares its package needs in:
 
-```sh
-bash scripts/install-termux
+```text
+.dispatch/termux-dependencies.json
 ```
 
-The setup script checks for managed commands first and installs only the missing
-packages. It intentionally avoids reinstalling baseline Termux tools such as
-`bash`, `curl`, and `ca-certificates`.
+Dispatch reads that manifest when the assistant is created, installs only missing packages, and tracks package ownership in its backend ledger outside the repo. Pre-existing packages are not removed when the assistant is deleted.
 
-When it installs packages, it records only those package names in ignored local
-state at `.agent/state/termux-installed-packages`. The uninstall script uses
-that record so it does not remove tools the user already had before this repo.
+Current manifest packages:
 
-Packages are installed one at a time so Termux/dpkg failures identify the exact
-package that failed. The `apt` stable-CLI warning from Termux is harmless; the
-important failure line is the named package printed immediately before the
-error.
+- `android-tools`: provides `adb` for controlling the NVIDIA Shield.
+- `imagemagick`: provides `magick` for Stremio screenshot debugging.
+- `jq`: parses Cinemeta JSON.
+- `netcat-openbsd`: provides `nc` for TCP discovery probes.
+- `perl`: provides millisecond timing helpers.
+- `python-yt-dlp`: provides `yt-dlp` for YouTube discovery.
+- `ripgrep`: provides `rg` for fast repo search.
+- `shellcheck`: shell script linting.
 
-The setup script does not install `ca-certificates` directly. Termux's OpenSSL
-package depends on `ca-certificates`, and common HTTPS tooling such as `curl`
-reaches it through Termux's own package dependency graph.
+The repo intentionally does not declare baseline Termux tools such as `bash`, `curl`, or `ca-certificates`.
 
-## Uninstall Dependencies
+## Manual Fallback Scripts
 
-Remove packages installed by this repo:
+`scripts/install-termux` and `scripts/uninstall-termux` are fallback helpers for running the repo outside Dispatch. They are not the package ownership mechanism for Dispatch-created assistants.
 
-```sh
-bash scripts/uninstall-termux
-```
-
-Preview removal first:
-
-```sh
-bash scripts/uninstall-termux --dry-run
-```
-
-The uninstall script removes only packages recorded as installed by this repo
-and does not run `autoremove`, so package dependencies left behind by Termux
-remain installed.
-
-Use a preview first when checking an unfamiliar environment:
+Manual install preview:
 
 ```sh
 bash scripts/install-termux --dry-run
 ```
 
-## Managed Dependencies
+Manual install:
 
-Installed only when the command is missing:
+```sh
+bash scripts/install-termux
+```
 
-- `adb`: connects to and controls the NVIDIA Shield.
-- `jq`: parses Cinemeta JSON.
-- `nc`: probes TCP `5555` while rediscovering the Shield.
-- `yt-dlp`: useful for structured YouTube search before launching a result.
-- `shellcheck`: script linting.
-- `ripgrep`: fast repo search.
-- `perl`: millisecond timing for Stremio stream-switch helpers.
-- `imagemagick`: `magick` command for Stremio screenshot debugging.
+Manual uninstall preview:
 
-The script assumes base Termux already provides `bash`, `curl`, package
-management, core shell utilities, and certificate handling.
+```sh
+bash scripts/uninstall-termux --dry-run
+```
 
-Package names are mostly the same as the command names, with these
-repo-relevant mappings:
+Manual uninstall:
 
-- `adb` comes from `android-tools`.
-- `nc` comes from `netcat-openbsd`.
-- `yt-dlp` comes from `python-yt-dlp`.
-- `rg` comes from `ripgrep`.
-- `magick` comes from `imagemagick`.
+```sh
+bash scripts/uninstall-termux
+```
 
-After installation, the script verifies that managed commands are on `PATH`.
-Missing managed commands fail the setup instead of producing a best-effort
-warning.
+The manual installer records only packages it installed in ignored local state at `.agent/state/termux-installed-packages`. The manual uninstall script removes only packages in that record and does not run `autoremove`.
+
+Packages are installed one at a time so Termux/dpkg failures identify the exact package that failed. The `apt` stable-CLI warning from Termux is harmless; the important failure line is the named package printed immediately before the error.
 
 ## Local Discovery
 

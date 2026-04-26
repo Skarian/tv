@@ -8,10 +8,15 @@ Usage:
 
 Install Termux packages needed to run this repo from a Codex agent on Android.
 
-This script assumes a normal Termux environment and does not install baseline
-Termux tools such as bash, curl, or ca-certificates. It installs only missing
-commands that are repo-specific or not guaranteed in base Termux, using Termux
-package names where they differ from command names.
+Dispatch-managed assistants should not use this script for package ownership.
+Dispatch reads `.dispatch/termux-dependencies.json`, installs missing packages,
+and tracks ownership in its own package ledger.
+
+This script is a manual fallback for running the repo outside Dispatch. It
+assumes a normal Termux environment and does not install baseline Termux tools
+such as bash, curl, or ca-certificates. It installs only missing commands that
+are repo-specific or not guaranteed in base Termux, using Termux package names
+where they differ from command names.
 
 Managed commands:
   - jq         -> jq

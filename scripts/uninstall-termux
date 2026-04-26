@@ -6,11 +6,15 @@ usage() {
 Usage:
   scripts/uninstall-termux [--dry-run]
 
-Uninstall Termux packages managed by this repo's setup script.
+Uninstall Termux packages installed by this repo's manual fallback setup script.
 
-This script removes only the explicitly managed repo packages. It does not
-remove baseline Termux tools such as bash, curl, or ca-certificates, and it does
-not run autoremove.
+Dispatch-managed assistants should not use this script for package ownership.
+Dispatch removes packages through its package ledger when an assistant is
+deleted.
+
+This script removes only packages recorded by scripts/install-termux. It does
+not remove baseline Termux tools such as bash, curl, or ca-certificates, and it
+does not run autoremove.
 
 Managed packages:
   jq

@@ -1,0 +1,14 @@
+{
+  "termux": {
+    "packages": [
+      "android-tools",
+      "imagemagick",
+      "jq",
+      "netcat-openbsd",
+      "perl",
+      "python-yt-dlp",
+      "ripgrep",
+      "shellcheck"
+    ]
+  }
+}

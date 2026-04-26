@@ -37,14 +37,16 @@ Spotify, a URL, or a saved preset.
 
 ## Setup
 
-Clone this repo in Termux on the device running the agent. If repo dependencies
-are not installed yet, run:
+When used through Dispatch, Termux dependencies are declared in:
 
-```sh
-bash scripts/install-termux
+```text
+.dispatch/termux-dependencies.json
 ```
 
-Then connect the TV and Sonos:
+Dispatch installs missing packages and tracks package ownership when the
+assistant is created.
+
+After the assistant workspace exists, connect the TV and Sonos:
 
 ```sh
 scripts/connect-tv
@@ -59,10 +61,12 @@ scripts/connect-tv TV_IP:5555
 scripts/connect-sonos SONOS_IP
 ```
 
-To remove Termux packages installed by this repo:
+For manual non-Dispatch setup, see `wiki/Termux Setup.md`.
+
+To preview manual fallback package removal:
 
 ```sh
-bash scripts/uninstall-termux
+bash scripts/uninstall-termux --dry-run
 ```
 
 ## Agent Notes
