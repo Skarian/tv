@@ -59,7 +59,7 @@ scripts/connect-tv TV_IP:5555
 scripts/connect-sonos SONOS_IP
 ```
 
-To preview removal of repo-managed Termux packages:
+To remove Termux packages installed by this repo:
 
 ```sh
 bash scripts/uninstall-termux

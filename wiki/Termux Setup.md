@@ -29,16 +29,16 @@ reaches it through Termux's own package dependency graph.
 
 ## Uninstall Dependencies
 
-Preview removal of repo-managed Termux packages:
+Remove packages installed by this repo:
 
 ```sh
 bash scripts/uninstall-termux
 ```
 
-Actually remove them:
+Preview removal first:
 
 ```sh
-bash scripts/uninstall-termux --yes
+bash scripts/uninstall-termux --dry-run
 ```
 
 The uninstall script removes only packages recorded as installed by this repo

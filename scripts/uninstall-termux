@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/uninstall-termux [--dry-run] [--yes]
+  scripts/uninstall-termux [--dry-run]
 
 Uninstall Termux packages managed by this repo's setup script.
 
@@ -23,13 +23,12 @@ Managed packages:
   imagemagick
 
 Options:
-  --dry-run      Print the package-manager command without running it. Default.
-  --yes          Actually run the uninstall command.
+  --dry-run      Print the package-manager command without running it.
   -h, --help     Show this help.
 USAGE
 }
 
-dry_run=1
+dry_run=0
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 managed_packages_file="$repo_root/.agent/state/termux-installed-packages"
@@ -38,10 +37,6 @@ while (($#)); do
   case "$1" in
     --dry-run)
       dry_run=1
-      shift
-      ;;
-    --yes)
-      dry_run=0
       shift
       ;;
     -h|--help)
@@ -102,7 +97,6 @@ if ((dry_run)); then
   printf 'DRY RUN: pkg uninstall -y'
   printf ' %q' "${installed_packages[@]}"
   printf '\n'
-  echo "Pass --yes to uninstall these packages."
   exit 0
 fi
 
